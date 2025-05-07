@@ -56,6 +56,8 @@ function Invoke-DscCacheRefresh {
 
     $cacheFilePath = Join-Path $env:LocalAppData "dsc\WindowsPSAdapterCache.json"
 
+    if ($null -ne $module -and $module.gettype().name -eq 'string') { $module = @($module) }
+
     if (Test-Path $cacheFilePath) {
         "Reading from Get-DscResource cache file $cacheFilePath" | Write-DscTrace
 
@@ -92,6 +94,9 @@ function Invoke-DscCacheRefresh {
                 if (-not $refreshCache) {
                     "Checking cache for stale entries" | Write-DscTrace
 
+                    $cachedModules = $dscResourceCacheEntries.DscResourceInfo | ForEach-Object { $_.ModuleName } | Sort-Object -Unique
+                    $missingModules = $module | Where-Object { $_ -notin $cachedModules }
+
                     foreach ($cacheEntry in $dscResourceCacheEntries) {
 
                         $cacheEntry.LastWriteTimes.PSObject.Properties | ForEach-Object {
@@ -118,7 +123,17 @@ function Invoke-DscCacheRefresh {
                             }
                         }
 
-                        if ($refreshCache) { break }
+                        if ($refreshCache) {
+                            if ($null -ne $module) {
+                                $module += $cacheEntry.DscResourceInfo.ModuleName
+                            }
+                            break
+                        }
+                    }
+
+                    if ($missingModules.Count -gt 0) {
+                        "Modules missing from cache: $($missingModules -join ', ')" | Write-DscTrace
+                        $refreshCache = $true
                     }
                 }
             }
@@ -129,6 +144,9 @@ function Invoke-DscCacheRefresh {
         $refreshCache = $true
     }
 
+    $module = $module | Sort-Object -Unique
+    "Module list: $($module -join ', ')" | Write-DscTrace
+
     if ($refreshCache) {
         'Constructing Get-DscResource cache' | Write-DscTrace
 
@@ -138,20 +156,23 @@ function Invoke-DscCacheRefresh {
         # improve by performance by having the option to only get details for named modules
         # workaround for File and SignatureValidation resources that ship in Windows
         if ($null -ne $module -and 'PSDesiredStateConfiguration' -ne $module) {
-            if ($module.gettype().name -eq 'string') {
-                $module = @($module)
-            }
             $DscResources = [System.Collections.Generic.List[Object]]::new()
             $Modules = [System.Collections.Generic.List[Object]]::new()
             $filteredResources = @()
             foreach ($m in $module) {
                 $DscResources += Get-DscResource -Module $m
                 $Modules += Get-Module -Name $m -ListAvailable
-
-                # Grab all DSC resources to filter out of the cache
-                $filteredResources += $dscResources | Where-Object -Property ModuleName -NE $null | ForEach-Object { [System.String]::Concat($_.ModuleName, '/', $_.Name) }
             }
 
+            if ('PSDesiredStateConfiguration' -in $module) {
+                $DscResources += Get-DscResource | Where-Object -Property ParentPath -eq "$env:windir\system32\Configuration\BaseRegistration"
+                $filteredResources += @(
+                    'PSDesiredStateConfiguration/File'
+                    'PSDesiredStateConfiguration/SignatureValidation'
+                )
+            }
+            # Grab all DSC resources to filter out of the cache
+            $filteredResources += $dscResources | Where-Object -Property ModuleName -NE $null | ForEach-Object { [System.String]::Concat($_.ModuleName, '/', $_.Name) }
             # Exclude the one module that was passed in as a parameter
             $existingDscResourceCacheEntries = $cache.ResourceCache | Where-Object -Property Type -NotIn $filteredResources
         }
